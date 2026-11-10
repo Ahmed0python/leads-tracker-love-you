@@ -45,6 +45,8 @@ with st.container(border=True):
         size_label = c7.selectbox("Minimum company size", list(SIZE_TIERS))
         industry = c8.selectbox("Target business type", list(INDUSTRIES))
         limit = c9.slider("Max leads", 10, 100, 30, step=5)
+        custom = st.text_input("Or type your own business type (overrides the list above)",
+                               placeholder="e.g. chimney sweep, moving company, plumber — separate several with commas")
         go = st.form_submit_button("🔎 Find leads", type="primary", use_container_width=True)
 
 # ---------- Step 2: run ----------
@@ -56,14 +58,15 @@ if go:
     else:
         params = dict(location=location.strip(), radius_km=RADIUS[radius_label], company=company.strip(),
                       product=product.strip(), campaign=campaign, persona=persona.strip() or "Owner",
-                      min_employees=SIZE_TIERS[size_label], industry=industry, limit=limit)
+                      min_employees=SIZE_TIERS[size_label], industry=industry, limit=limit,
+                      custom=custom.strip())
         bar = st.progress(0.0, text="Starting…")
         try:
             leads = run_campaign(params, lambda f, m: bar.progress(min(f, 1.0), text=m))
             st.session_state["leads"] = leads
             st.session_state["meta"] = dict(location=params["location"], range=radius_label, company=company,
                                             product=product, campaign=campaign, persona=params["persona"],
-                                            min_size=size_label, industry=industry)
+                                            min_size=size_label, industry=custom.strip() or industry)
             if not leads:
                 st.warning("No businesses found. Try a bigger radius or a different business type.")
         except Exception as e:

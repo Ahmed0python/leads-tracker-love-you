@@ -3,6 +3,7 @@ OpenStreetMap (Nominatim + Overpass) for businesses, then each company's own web
 for emails / phones / LinkedIn / contact names. No API keys needed."""
 import re
 import socket
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import radians, sin, cos, asin, sqrt
 from urllib.parse import urljoin, urlparse, quote_plus
@@ -17,7 +18,9 @@ except ImportError:  # falls back to a plain DNS lookup
 
 UA = {"User-Agent": "LeadFinderApp/1.0 (personal lead research tool)"}
 OVERPASS = ["https://overpass-api.de/api/interpreter",
-            "https://overpass.kumi.systems/api/interpreter"]
+            "https://lz4.overpass-api.de/api/interpreter",
+            "https://z.overpass-api.de/api/interpreter",
+            "https://overpass.private.coffee/api/interpreter"]
 
 # Target business types -> OpenStreetMap tag filters
 INDUSTRIES = {
@@ -31,6 +34,20 @@ INDUSTRIES = {
     "Auto & repair": ['"shop"~"car|car_repair|car_parts"'],
     "Education & training": ['"amenity"~"school|college|language_school|driving_school"'],
     "Crafts & trades": ['"craft"'],
+}
+# Extra words to search for when the user types their own business type
+SYNONYMS = {
+    "moving": ["moving", "mover", "removal", "relocation"],
+    "movers": ["moving", "mover", "removal", "relocation"],
+    "moving company": ["moving", "mover", "removal", "relocation"],
+    "chimney": ["chimney", "fireplace", "flue", "hearth"],
+    "chimney sweep": ["chimney", "fireplace", "flue", "hearth"],
+    "plumber": ["plumb"],
+    "electrician": ["electric"],
+    "roofing": ["roof"],
+    "hvac": ["hvac", "heating", "air conditioning", "ventilation"],
+    "cleaning": ["clean", "janitor", "maid"],
+    "pest control": ["pest", "exterminat"],
 }
 SIZE_TIERS = {"Any size": 0, "10+ employees": 10, "50+ employees": 50, "250+ employees": 250}
 
@@ -58,21 +75,43 @@ def geocode(place):
     return float(d[0]["lat"]), float(d[0]["lon"]), (s, w, n, e)
 
 
-def discover(lat, lon, bbox, radius_km, industry, limit):
+def _filters(industry, custom):
+    """Overpass tag filters: the ready-made list, or the user's own words (comma separated)."""
+    if not custom.strip():
+        return INDUSTRIES[industry]
+    out = []
+    for term in re.split(r"[,;/]", custom.lower()):
+        term = re.sub(r"[^\w\s-]", "", term).strip()
+        if not term:
+            continue
+        words = SYNONYMS.get(term, [term])
+        rx = "|".join(re.sub(r"\s+", "[ _]", w) for w in words)
+        for key in ("shop", "craft", "office", "amenity", "service", "tourism", "leisure"):
+            out.append(f'"{key}"~"{rx}",i')   # category tags
+        out.append(f'"name"~"{rx}",i')        # business names
+    return out
+
+
+def discover(lat, lon, bbox, radius_km, industry, limit, custom=""):
     area = f"(around:{int(radius_km * 1000)},{lat},{lon})" if radius_km else "({},{},{},{})".format(*bbox)
-    body = "".join(f"nwr[{f}][name]{area};" for f in INDUSTRIES[industry])
+    body = "".join(f"nwr[{f}][name]{area};" for f in _filters(industry, custom))
     query = f"[out:json][timeout:60];({body});out center tags {limit * 5};"
-    data, last_err = None, None
-    for url in OVERPASS:
-        try:
-            r = requests.post(url, data={"data": query}, headers=UA, timeout=90)
-            r.raise_for_status()
-            data = r.json()
+    data, errors = None, []
+    for attempt in range(2):
+        for url in OVERPASS:
+            try:
+                r = requests.post(url, data={"data": query}, headers=UA, timeout=90)
+                r.raise_for_status()
+                data = r.json()
+                break
+            except Exception as e:  # try the next server
+                errors.append(f"{urlparse(url).netloc}: {str(e)[:80]}")
+        if data is not None:
             break
-        except Exception as e:  # try the mirror
-            last_err = e
+        time.sleep(4)
     if data is None:
-        raise RuntimeError(f"OpenStreetMap search failed ({last_err}). Try a smaller area.")
+        raise RuntimeError("The OpenStreetMap servers did not answer. Details: "
+                           + " | ".join(errors[-len(OVERPASS):]) + ". Try again in a minute or use a smaller radius.")
     seen, recs = set(), []
     for el in data.get("elements", []):
         t = el.get("tags", {})
@@ -216,7 +255,12 @@ def run_campaign(p, progress=lambda frac, msg: None):
     progress(0.05, "Locating the area…")
     lat, lon, bbox = geocode(p["location"])
     progress(0.15, "Searching OpenStreetMap for businesses…")
-    recs = discover(lat, lon, bbox, p["radius_km"], p["industry"], p["limit"])
+    custom = p.get("custom", "")
+    recs = discover(lat, lon, bbox, p["radius_km"], p["industry"], p["limit"], custom)
+    if custom.strip():  # use the user's own wording in notes and pitch hooks
+        label = re.split(r"[,;/]", custom)[0].strip()
+        for r in recs:
+            r["category"] = label
     leads = []
     if not recs:
         return leads
