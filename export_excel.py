@@ -3,25 +3,17 @@ from datetime import datetime
 from io import BytesIO
 
 from openpyxl import Workbook
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-COLUMNS = ["Company Name", "Contact Person (possible)", "Email", "Email Status", "Phone", "Website",
-           "LinkedIn", "LinkedIn Search", "Address", "City/Area", "Category", "Distance (km)", "Employees",
-           "Match Score", "Priority", "Lead Source", "ICP Fit Notes", "Pitch Hook"]
-SCORE_COL = COLUMNS.index("Match Score") + 1
+COLUMNS = ["Company Name", "Contact Person", "Email", "Email Status", "Phone", "Website", "LinkedIn",
+           "Address", "Match Score", "Priority", "Lead Source", "ICP Fit Notes", "Pitch Hook"]
+SCORE_COL = COLUMNS.index("Match Score") + 1      # I
 PRIO_COL = COLUMNS.index("Priority") + 1          # J
-LINK_COLS = tuple(COLUMNS.index(n) + 1 for n in ("Website", "LinkedIn", "LinkedIn Search"))
-CENTER_COLS = tuple(COLUMNS.index(n) + 1 for n in ("Distance (km)", "Employees", "Priority"))
+LINK_COLS = (COLUMNS.index("Website") + 1, COLUMNS.index("LinkedIn") + 1)
 WRAP_COLS = (COLUMNS.index("ICP Fit Notes") + 1, COLUMNS.index("Pitch Hook") + 1)
 FONT = "Arial"
-
-
-def clean(v):
-    """Strip characters Excel rejects (these crash openpyxl) from scraped text."""
-    return ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v
 
 
 def build_workbook(leads, meta):
@@ -43,20 +35,18 @@ def build_workbook(leads, meta):
     # rows
     for r, lead in enumerate(leads, 2):
         for c, name in enumerate(COLUMNS, 1):
-            v = clean(lead.get(name, ""))
+            v = lead.get(name, "")
             if name == "Match Score":
                 v = (v or 0) / 100
             cell = ws.cell(row=r, column=c, value=v)
-            if isinstance(v, str) and v[:1] in ("=", "+", "-", "@"):
-                cell.data_type = "s"   # store as plain text, never as a formula
             cell.font = Font(name=FONT, size=10)
             cell.alignment = Alignment(vertical="top", wrap_text=c in WRAP_COLS)
             if c == SCORE_COL:
                 cell.number_format = "0%"
                 cell.alignment = Alignment(horizontal="center", vertical="top")
-            if c in CENTER_COLS:
+            if c == PRIO_COL:
                 cell.alignment = Alignment(horizontal="center", vertical="top")
-            if c in LINK_COLS and isinstance(v, str) and v.startswith(("http://", "https://")):
+            if c in LINK_COLS and v:
                 cell.hyperlink = v
                 cell.font = Font(name=FONT, size=10, color="0563C1", underline="single")
     last = max(len(leads) + 1, 2)
@@ -64,8 +54,6 @@ def build_workbook(leads, meta):
     # auto-fit widths (capped; long text columns get a fixed wrapped width)
     for c, name in enumerate(COLUMNS, 1):
         longest = max([len(str(name))] + [len(str(l.get(name, ""))) for l in leads])
-        if name in ("LinkedIn", "LinkedIn Search", "Website"):
-            longest = min(longest, 30)
         ws.column_dimensions[get_column_letter(c)].width = 55 if c in WRAP_COLS else min(max(longest + 3, 12), 48)
     ws.freeze_panes = "B2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}{last}"
@@ -99,21 +87,76 @@ def build_workbook(leads, meta):
         ("High-Priority Leads", f'=COUNTIF({rng(p)},"High")'),
         ("Leads with Match Score > 85%", f'=COUNTIF({rng(s)},">0.85")'),
         ("Average Match Score", f"=IFERROR(AVERAGE({rng(s)}),0)"),
-        ("Leads with Email", f'=COUNTIF({rng("C")},"?*")'),
     ]
     md["A1"], md["B1"] = "Campaign Summary", ""
     md["A1"].font = Font(name=FONT, bold=True, color="FFFFFF", size=12)
     md["A1"].fill = md["B1"].fill = head_fill
     for i, (k, v) in enumerate(rows, 2):
         md.cell(row=i, column=1, value=k).font = Font(name=FONT, bold=True, size=10)
-        cell = md.cell(row=i, column=2, value=clean(v))
+        cell = md.cell(row=i, column=2, value=v)
         cell.font = Font(name=FONT, size=10)
         cell.alignment = Alignment(horizontal="left")
     md["B14"].number_format = "0%"
-    md["A17"] = "Note: Email Status checks the domain only; it does not confirm the mailbox exists. Contact Person is auto-detected from the website - verify before use."
-    md["A17"].font = Font(name=FONT, italic=True, size=9)
     md.column_dimensions["A"].width = 32
     md.column_dimensions["B"].width = 50
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+POST_COLUMNS = ["Community", "Post Date", "Post Title", "Snippet", "Post URL", "Matched Keyword", "Reply Starter"]
+
+
+def build_posts_workbook(posts, meta):
+    """Excel for the 'home clients' mode: 'People Asking for Help' + 'Campaign Metadata'. Returns bytes."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "People Asking for Help"
+    head_fill = PatternFill("solid", fgColor="1F3864")
+    for c, name in enumerate(POST_COLUMNS, 1):
+        cell = ws.cell(row=1, column=c, value=name)
+        cell.font = Font(name=FONT, bold=True, color="FFFFFF", size=11)
+        cell.fill = head_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
+    widths = {"Community": 18, "Post Date": 18, "Post Title": 55, "Snippet": 60, "Post URL": 40,
+              "Matched Keyword": 24, "Reply Starter": 60}
+    wrap = ("Post Title", "Snippet", "Reply Starter")
+    for r, p in enumerate(posts, 2):
+        for c, name in enumerate(POST_COLUMNS, 1):
+            cell = ws.cell(row=r, column=c, value=p.get(name, ""))
+            cell.font = Font(name=FONT, size=10)
+            cell.alignment = Alignment(vertical="top", wrap_text=name in wrap)
+            if name == "Post URL" and cell.value:
+                cell.hyperlink = cell.value
+                cell.font = Font(name=FONT, size=10, color="0563C1", underline="single")
+    last = max(len(posts) + 1, 2)
+    for c, name in enumerate(POST_COLUMNS, 1):
+        ws.column_dimensions[get_column_letter(c)].width = widths[name]
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(POST_COLUMNS))}{last}"
+
+    md = wb.create_sheet("Campaign Metadata")
+    rows = [
+        ("Your Company", meta.get("company", "")),
+        ("Service Offered", meta.get("service", "")),
+        ("Communities Searched", meta.get("communities", "")),
+        ("Keywords", meta.get("keywords", "")),
+        ("Posts From Last (days)", meta.get("days", "")),
+        ("Date Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("Total Posts Found", f"=COUNTA('People Asking for Help'!E2:E{last})"),
+    ]
+    md["A1"], md["B1"] = "Campaign Summary", ""
+    md["A1"].font = Font(name=FONT, bold=True, color="FFFFFF", size=12)
+    md["A1"].fill = md["B1"].fill = head_fill
+    for i, (k, v) in enumerate(rows, 2):
+        md.cell(row=i, column=1, value=k).font = Font(name=FONT, bold=True, size=10)
+        cell = md.cell(row=i, column=2, value=v)
+        cell.font = Font(name=FONT, size=10)
+        cell.alignment = Alignment(horizontal="left")
+    md.column_dimensions["A"].width = 30
+    md.column_dimensions["B"].width = 60
 
     buf = BytesIO()
     wb.save(buf)

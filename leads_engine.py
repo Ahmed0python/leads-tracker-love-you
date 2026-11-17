@@ -1,4 +1,5 @@
-"""Lead discovery + enrichment using free sources only:
+cd "D:\leads bot"
+python -m streamlit run app.py"""Lead discovery + enrichment using free sources only:
 OpenStreetMap (Nominatim + Overpass) for businesses, then each company's own website
 for emails / phones / LinkedIn / contact names. No API keys needed."""
 import re
